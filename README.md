@@ -1,2 +1,2 @@
-# repo_analyzer
-A Python Repository Analyzer to showcase skills.
+# github_repo_analyzer
+A GitHub Repository Analyzer written in Python to learn Python and showcase my skills.
