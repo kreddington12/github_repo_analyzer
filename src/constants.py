@@ -7,6 +7,7 @@ INVALID = "invalid url"
 REQUEST_TIMEDOUT = "A request to search the GitHub repo has timed out: {}"
 INVALID_REPO_URL = "The format of the repo URL is invalid."
 REQUEST_ERROR = "An error occurred: {}"
+FILE_NAME_MISSING = "CODE ERROR: A required list of filenames is missing"
 
 
 #Constants used in the final report
@@ -39,8 +40,12 @@ Your README file should have the following information:\n\
     - A simple quick-start code example that a user can follow to provide a demonstration of what the package can do for them\
     - Links to your package's documentation / website, if applicable.\
     - A few descriptive links to any tutorials you've created for your package."
-REQUIREMENTS_FILE_RETRIEVAL_ERROR = "There was an error trying to retrieve a requirements file. No analysis was completed on the dependencies."
+REQUIREMENTS_FILE_RETRIEVAL_ERROR = "There was an error trying to retrieve a requirements file. \
+No analysis was completed on the dependencies."
 REQUIREMENTS_FILE_FOUND = "A requirements file was found at this location: {}"
+REQUIREMENTS_NEED_UPDATING = "It's recommended to always run on the latest version of packages. \
+Check changes of the latest version to ensure they won't break your code. Test any updates with your code.\n\
+The following packages may need an update:"
 
 # Report End
 END_OF_REPORT = "****** End of Analysis Report *******\n"

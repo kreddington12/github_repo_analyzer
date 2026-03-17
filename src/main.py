@@ -11,11 +11,11 @@ if __name__ == "__main__":
 
     repo_data = analyze.get_repo_data(repo_url)
     if repo_data["owner"] == constants.INVALID:
-        print(f)
+        print(constants.INVALID_REPO_URL)
         sys.exit(1)
 
     print(analyze.final_report(
         repo_url,
         analyze.check_readme_exists(repo_data),
-        analyze.check_dependencies(repo_data)
+        analyze.check_outdated_dependencies(repo_data)
     ))

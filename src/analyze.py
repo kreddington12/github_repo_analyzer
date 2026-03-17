@@ -9,13 +9,17 @@ Limitations:
 """
 import re
 import os
-from typing import Dict, List
+import base64
+import json
 import requests
+from packaging import version
+from packaging.version import InvalidVersion
+
 import constants
 
 REQUIREMENTS_FILE = ["requirements.txt", "pyproject.toml"]
 
-def get_repo_data(github_url: str) -> Dict[str, str]:
+def get_repo_data(github_url: str) -> dict[str, str]:
     """
     Pulls out the owner and repo name from the GitHub URL.
     Values are returned as INVALID if the repo URL format is invalid.
@@ -43,7 +47,20 @@ def get_api_url(owner: str, repo_name: str, search_in_repo:bool = False) -> str:
 
     return api_url
 
-def make_request(list_of_filenames: List[str], api_url: str, request_timeout=(2, 5)) -> dict[str, object]:
+def make_request(list_of_filenames: list[str], api_url: str, request_timeout=(3, 10)) -> dict[str, object]:
+    """
+    :param list_of_filenames: files to search for
+    :param api_url: API to call
+    :param request_timeout: how long to wait until requests.get times out
+    :return: Exceptions return as an ERROR, otherwise, response from API call is returned regardless of status code.
+
+    IMPORTANT: Status codes of 200 and 404 should be handled by calling method and not generalized here.
+    All other status codes are returned as ERROR
+    """
+    if len(list_of_filenames) == 0:
+        print(constants.FILE_NAME_MISSING)
+        return None
+
     for file in list_of_filenames:
         request_url = f"{api_url}{file}"
         github_token = os.environ.get("GITHUB_PAT")
@@ -56,28 +73,43 @@ def make_request(list_of_filenames: List[str], api_url: str, request_timeout=(2,
             response = requests.get(request_url, headers=headers, timeout=request_timeout)
         except requests.exceptions.Timeout:
             print(constants.REQUEST_TIMEDOUT.format(request_url))
-            return constants.ERROR
+            return None
         except requests.exceptions.RequestException as e:
             print(constants.REQUEST_ERROR.format(e))
-            return constants.ERROR
+            return None
         else:
             if response.status_code == 200:
-                break
+                data = json.loads(response.text)
+                if "total_count" in data and data["total_count"] == 0:
+                    # GitHub shut down the request due to their 30-second time out limit.
+                    print(constants.REQUEST_TIMEDOUT.format(request_url))
+                    return None
+                else:
+                    # file found; break out of for loop
+                    return response
 
-    return response
+    if response.status_code == 404:
+        return response
+    return None
 
 def get_latest_version(package_name: str) -> str:
     """
-    Check the latest version of a Python package
+    Fetches the latest version of the specified package from the PyPi API
     """
     url = f"https://pypi.org/pypi/{package_name}/json"
-    response = requests.get(url, timeout=5)
-    if response.status_code == 200:
-        data = response.json()
-        return data['info']['version']
-    return ""
+    try:
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        latest_version = response.json()['info']['version']
+    except requests.exceptions.HTTPError:
+        return None
+    except requests.exceptions.RequestException as e:
+        print(f"While fetching data for {package_name}, " + constants.REQUEST_ERROR.format(e))
+        return None
 
-def check_readme_exists(repo_data: Dict[str, str]) -> str:
+    return latest_version
+
+def check_readme_exists(repo_data: dict[str, str]) -> str:
     """
     Checks for README file in root directory or docs directory as allowed by GitHub
     """
@@ -91,93 +123,77 @@ def check_readme_exists(repo_data: Dict[str, str]) -> str:
     api_url: str = get_api_url(repo_data["owner"], repo_data["repo_name"])
 
     response = make_request(readme_file_options, api_url)
-    status_code = response.status_code
-    if status_code == 200:
-        return response.json()["html_url"]
+    if response:
+        status_code = response.status_code
+        if status_code == 200:
+            return response.json()["html_url"]
 
-    if status_code == 404:
-        return constants.NO_FILE
+        if status_code == 404:
+            return constants.NO_FILE
 
     return constants.ERROR
 
-def check_dependencies(repo_data: Dict[str, str]) -> str:
+def decode_content_from_base64(content_base64: str) -> str:
+    return base64.b64decode(content_base64).decode("utf-8")
+
+def get_list_of_outdated_dependencies(requirements_file_contents) -> list(str):
+    """
+    Given a string of file contents, creates a list of any outdated dependencies,
+    along with the current version and the latest version.
+    If no version is listed, or if the version is current, just continue
+    """
+    outdated_dependencies = []
+    for line in requirements_file_contents.splitlines():
+        if line.startswith("#"):
+            continue
+        elif "==" in line:
+            package_name, current_version = line.split("==")
+            latest_version = get_latest_version(package_name)
+            try:
+                if version.parse(latest_version) > version.parse(current_version):
+                    outdated_dependencies.append(f"Package: {package_name}, Current: {current_version}, Latest: {latest_version}")
+            except InvalidVersion:
+                # Unable to parse values so add to the report. User can decide how to handle it
+                outdated_dependencies.append(f"Package: {package_name}, Current: {current_version}, Latest: {latest_version}")
+        else:
+            continue
+    return outdated_dependencies
+
+def check_outdated_dependencies(repo_data: dict[str, str]) -> str:
     """
     Searches for a requirements file from the root directory since we can find it here for over 80% of repos.
     If not found, conduct a search of the repo for the filename
     Check the file for any dependencies that need updating
     """
-    keys = ["location", "filename", "file_contents", "dict_of_dependencies"]
+    keys = ["location", "filename", "file_contents", "outdated_dependencies"]
     dependencies = dict.fromkeys(keys)
 
-    github_token = os.environ.get("GITHUB_PAT")
     api_url = get_api_url(repo_data["owner"], repo_data["repo_name"])
-    headers = {
-        "Authorization": f"Bearer {github_token}",
-        "Accept": "application/vnd.github+json" # Recommended header for GitHub API
-    }
 
-
-    for file in REQUIREMENTS_FILE:
-        dependency_url = f"{api_url}{file}"
-        try:
-            response = requests.get(dependency_url, headers=headers, timeout=5)
-        except requests.exceptions.Timeout:
-            print(constants.REQUEST_TIMEDOUT)
-        except requests.exceptions.RequestException as e:
-            print(constants.REQUEST_ERROR.format(e))
-        else:
-            status_code = response.status_code
-            if status_code == 200:
-                dependencies["filename"] = file
-                break
+    response = make_request(REQUIREMENTS_FILE, api_url)
 
     # if not found in root directory, search throughout the repo
-    if status_code in locals() and status_code == 404:
+    if response == constants.ERROR or response == constants.NO_FILE or response.status_code == 404:
         api_url = get_api_url(repo_data["owner"], repo_data["repo_name"], True)
-        for file in REQUIREMENTS_FILE:
-            dependency_url = f"{api_url}{file}"
-            try:
-                response = requests.get(dependency_url, timeout=(2, 60))
-            except requests.exceptions.Timeout:
-                print(constants.REQUEST_TIMEDOUT)
-            except requests.exceptions.RequestException as e:
-                print(constants.REQUEST_ERROR.format(e))
-            else:
-                status_code = response.status_code
-                if status_code == 200:
-                    dependencies["filename"] = file
-                    break
+        response = make_request(REQUIREMENTS_FILE, api_url, (3,27))
+        if not response:
+            return constants.ERROR
 
-    if status_code:
-        if status_code == 200:
-            dependencies["location"] = api_url
-            u_content = response.json()["content"]
-            dependencies["dict_of_dependencies"] = get_list_of_dependencies(dependencies["file_contents"])
-            return dependencies
-        if status_code == 404:
+        # if the file was still not found, return
+        if response.status_code == 404:
             return constants.NO_FILE
+
+    if response.status_code == 200:
+        data = response.json()
+        dependencies["location"] = data["html_url"]
+        dependencies["filename"] = data["name"]
+        dependencies["file_contents"] = decode_content_from_base64(data["content"])
+        dependencies["outdated_dependencies"] = get_list_of_outdated_dependencies(dependencies["file_contents"])
+        return dependencies
+
     return constants.ERROR
 
-def get_list_of_dependencies(requirements_file_contents) -> Dict[str, str, str]:
-    """
-    Given a string of file contents, creates a list of dependencies and any current version used
-    Returns a dictionary with the following keys:
-        1. dependency
-        2. current version
-        3. placeholder for latest version
-    """
-    keys = ["dependency", "current_version", "latest_version"]
-    dict_of_dependencies = dict.fromkeys(keys)
-    return dict_of_dependencies
-
-def analyze_dependencies(dependencies: Dict[str, str]) -> List[str]:
-    """
-    Collect a list of dependencies that should be updated.
-    """
-
-    return "dependencies analyzed"
-
-def final_report(repo: str, readme_file: str, dependencies: Dict[str, str]) -> str:
+def final_report(repo: str, readme_file: str, dependencies: list(str)) -> str:
     """
     Creates a report of a GitHub repo.
     """
@@ -197,12 +213,16 @@ def final_report(repo: str, readme_file: str, dependencies: Dict[str, str]) -> s
     report += "\n\n"
 
     # Dependencies
+    report += "2.  "
     if dependencies == constants.NO_FILE:
         report += constants.NO_REQUIREMENTS_FILE
-    elif readme_file == constants.ERROR:
+    elif dependencies == constants.ERROR:
         report += constants.REQUIREMENTS_FILE_RETRIEVAL_ERROR
     else:
-        report +=  constants.REQUIREMENTS_FILE_FOUND.format(dependencies["dependency_location"])
+        report += constants.REQUIREMENTS_FILE_FOUND.format(dependencies["location"]) + "\n\n"
+        report += constants.REQUIREMENTS_NEED_UPDATING
+        for package in dependencies["outdated_dependencies"]:
+            report += "\n" + package
 
     report += "\n\n"
 
