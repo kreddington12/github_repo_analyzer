@@ -1,10 +1,13 @@
+"""
+Main Project File
+"""
 import sys
 import constants
 import analyze
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print(f"Repo URL is missing. Retry by adding the Repo URL as an argument.")
+        print("Repo URL is missing. Retry by adding the Repo URL as an argument.")
         sys.exit(1)
     repo_url = sys.argv[1]
     print(f"Checking {repo_url}")

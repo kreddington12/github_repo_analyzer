@@ -51,7 +51,7 @@ def test_make_request_success(mocker):
     assert result.status_code == 200
     requests.get.assert_called_once_with("https://api.github.com/repos/owner/repo_name/contents/filename1",
                                          headers=headers,
-                                         timeout=(2, 5))
+                                         timeout=(3, 10))
 
 def test_make_request_timeout(mocker):
     """
@@ -67,10 +67,10 @@ def test_make_request_timeout(mocker):
     result = analyze.make_request(["filename"],
                                   "https://api.github.com/repos/owner/repo_name/contents/")
 
-    assert result == constants.ERROR
+    assert result is None
     requests.get.assert_called_once_with("https://api.github.com/repos/owner/repo_name/contents/filename",
                                          headers=headers,
-                                         timeout=(2,5))
+                                         timeout=(3, 10))
 
 def test_make_request_exception(mocker):
     """
@@ -85,10 +85,10 @@ def test_make_request_exception(mocker):
 
     result = analyze.make_request(["filename"], "https://api.github.com/repos/owner/repo_name/contents/")
 
-    assert result == constants.ERROR
+    assert result is None
     requests.get.assert_called_once_with("https://api.github.com/repos/owner/repo_name/contents/filename",
                                          headers=headers,
-                                         timeout=(2,5))
+                                         timeout=(3, 10))
 
 def test_check_readme_exists_returns_success(mocker):
     """
@@ -117,11 +117,9 @@ def test_check_readme_exists_returns_no_file_found(mocker):
 
 def test_check_readme_exists_returns_error(mocker):
     """
-    Returns an error when requesting whether a file exists
+    Returns constants.ERROR when an error is received from the API call
     """
-    mock_response = mocker.MagicMock()
-    mock_response.status_code = 500
-    mocker.patch('requests.get', return_value=mock_response)
+    mocker.patch('requests.get', return_value=None)
 
     repo_data = {"owner": "owner", "repo_name": "repo_name"}
     result = analyze.check_readme_exists(repo_data)
@@ -146,7 +144,7 @@ def test_get_latest_version_package_not_found(mocker):
     mocker.patch('requests.get', side_effect = requests.exceptions.HTTPError)
 
     result = analyze.get_latest_version("not_there")
-    assert result == None
+    assert result is None
 
 def test_get_list_of_outdated_dependencies(mocker):
     """
@@ -156,10 +154,13 @@ def test_get_list_of_outdated_dependencies(mocker):
     mocker.patch('analyze.get_latest_version', return_value="3.0.0")
 
     result = analyze.get_list_of_outdated_dependencies(content)
-    assert result == [f"Package: numpy, Current: 2.2.2, Latest: 3.0.0",
-                      f"Package: pandas, Current: 2.2.3, Latest: 3.0.0"]
+    assert result == ["Package: numpy, Current: 2.2.2, Latest: 3.0.0",
+                      "Package: pandas, Current: 2.2.3, Latest: 3.0.0"]
 
 def test_check_outdated_dependencies_returns_success(mocker):
+    """
+    A requirements file was found and a list of outdated dependencies has been created
+    """
     mock_response = mocker.MagicMock()
     mock_response.status_code = 200
     mock_response.json.return_value = {"html_url": "https://github.com/owner/repo_name/blob/main/filename",
@@ -183,6 +184,9 @@ def test_check_outdated_dependencies_returns_success(mocker):
     assert result == dependencies
 
 def test_check_outdated_dependencies_returns_no_file_found(mocker):
+    """
+    No requirements file was found.
+    """
     mock_response = mocker.MagicMock()
     mock_response.status_code = 404
     mocker.patch('requests.get', return_value=mock_response)
@@ -192,33 +196,48 @@ def test_check_outdated_dependencies_returns_no_file_found(mocker):
     assert result == constants.NO_FILE
 
 def test_check_outdated_dependencies_returns_error(mocker):
-    mock_response = mocker.MagicMock()
-    mock_response.status_code = 500
-    mocker.patch('requests.get', return_value=mock_response)
-
+    """
+    Returns constants.ERROR when an error is received from the API call
+    """
+    mocker.patch('requests.get', return_value=None)
     repo_data = {"owner": "owner", "repo_name": "repo_name"}
     result = analyze.check_outdated_dependencies(repo_data)
     assert result == constants.ERROR
 
 def test_final_report_no_readme_no_requirements():
+    """
+    Tests that the report reflects when files were not found
+    """
     result = analyze.final_report("https://github.com/owner/repo", constants.NO_FILE, constants.NO_FILE)
     assert constants.NO_README_FILE in result
     assert constants.NO_REQUIREMENTS_FILE in result
 
 def test_final_report_readme_error():
+    """
+    Tests that a search for a readme file properly reports there was an error
+    """
     result = analyze.final_report("https://github.com/owner/repo", constants.ERROR, constants.NO_FILE)
     assert constants.README_FILE_RETRIEVAL_ERROR in result
 
 def test_final_report_readme_found():
+    """
+    Tests that the report properly analyzed a successful readme file
+    """
     readme_url = "https://github.com/owner/repo/blob/main/README.md"
     result = analyze.final_report("https://github.com/owner/repo", readme_url, constants.NO_FILE)
     assert readme_url in result
 
 def test_final_report_dependencies_error():
+    """
+    Tests that a search for a requirements file properly reports there was an error
+    """
     result = analyze.final_report("https://github.com/owner/repo", constants.ERROR, constants.ERROR)
     assert constants.REQUIREMENTS_FILE_RETRIEVAL_ERROR in result
 
 def test_final_report_dependencies_found():
+    """
+    Tests that the report properly analyzed a successful requirements file and it's outdated dependencies
+    """
     dependencies = {
         "location": "requirements.txt",
         "outdated_dependencies": ["Package: numpy, Current: 1.0.0, Latest: 2.0.0"]

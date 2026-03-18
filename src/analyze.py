@@ -10,7 +10,8 @@ Limitations:
 import re
 import os
 import base64
-import json
+import sys
+
 import requests
 from packaging import version
 from packaging.version import InvalidVersion
@@ -36,7 +37,7 @@ def get_repo_data(github_url: str) -> dict[str, str]:
     repo_data["owner"], repo_data["repo_name"] = github_match.groups()
     return repo_data
 
-def get_api_url(owner: str, repo_name: str, search_in_repo:bool = False) -> str:
+def get_api_url(owner: str, repo_name: str, search_in_repo: bool = False) -> str:
     """
     Creates a URL for the API based on the owner, repo name and search criteria
     """
@@ -47,28 +48,34 @@ def get_api_url(owner: str, repo_name: str, search_in_repo:bool = False) -> str:
 
     return api_url
 
-def make_request(list_of_filenames: list[str], api_url: str, request_timeout=(3, 10)) -> dict[str, object]:
+def make_request(list_of_filenames: list[str], api_url: str, request_timeout=(3, 10)) -> dict[str, object] | None:
     """
     :param list_of_filenames: files to search for
     :param api_url: API to call
     :param request_timeout: how long to wait until requests.get times out
-    :return: Exceptions return as an ERROR, otherwise, response from API call is returned regardless of status code.
+    :return: Exceptions return as None, otherwise, response from API call is returned regardless of status code.
 
     IMPORTANT: Status codes of 200 and 404 should be handled by calling method and not generalized here.
-    All other status codes are returned as ERROR
+    All other status codes are returned as None
     """
     if len(list_of_filenames) == 0:
         print(constants.FILE_NAME_MISSING)
+        sys.exit(1)
+
+    github_token = os.environ.get("GITHUB_PAT")
+    if not github_token:
+        print("GitHub token is missing. Ensure proper environment variable is set.")
         return None
 
+    headers = {
+        "Authorization": f"Bearer {github_token}",
+        "Accept": "application/vnd.github+json" # Recommended header for GitHub API
+    }
+
+    # Keep going through list of files until a file is found, or if the call errored or timed out.
+    response = None
     for file in list_of_filenames:
         request_url = f"{api_url}{file}"
-        github_token = os.environ.get("GITHUB_PAT")
-        headers = {
-            "Authorization": f"Bearer {github_token}",
-            "Accept": "application/vnd.github+json" # Recommended header for GitHub API
-        }
-
         try:
             response = requests.get(request_url, headers=headers, timeout=request_timeout)
         except requests.exceptions.Timeout:
@@ -77,22 +84,22 @@ def make_request(list_of_filenames: list[str], api_url: str, request_timeout=(3,
         except requests.exceptions.RequestException as e:
             print(constants.REQUEST_ERROR.format(e))
             return None
-        else:
-            if response.status_code == 200:
-                data = json.loads(response.text)
-                if "total_count" in data and data["total_count"] == 0:
-                    # GitHub shut down the request due to their 30-second time out limit.
-                    print(constants.REQUEST_TIMEDOUT.format(request_url))
-                    return None
-                else:
-                    # file found; break out of for loop
-                    return response
 
-    if response.status_code == 404:
+        if response:
+            data = response.json()
+            if "total_count" in data and data["total_count"] == 0:
+                # GitHub shut down the request due to their 30-second time out limit.
+                print(constants.REQUEST_TIMEDOUT.format(request_url))
+            if response.status_code == 200:
+                # file found; break out of for loop
+                return response
+
+    # return the response for a 404, so calling method can handle it.
+    if response and response.status_code == 404:
         return response
     return None
 
-def get_latest_version(package_name: str) -> str:
+def get_latest_version(package_name: str) -> str | None:
     """
     Fetches the latest version of the specified package from the PyPi API
     """
@@ -134,9 +141,12 @@ def check_readme_exists(repo_data: dict[str, str]) -> str:
     return constants.ERROR
 
 def decode_content_from_base64(content_base64: str) -> str:
+    """
+    Takes a base64 string (ie. from a JSON response) and decodes it to "utf-8" (a readable string)
+    """
     return base64.b64decode(content_base64).decode("utf-8")
 
-def get_list_of_outdated_dependencies(requirements_file_contents) -> list(str):
+def get_list_of_outdated_dependencies(requirements_file_contents: str) -> list[str]:
     """
     Given a string of file contents, creates a list of any outdated dependencies,
     along with the current version and the latest version.
@@ -146,24 +156,28 @@ def get_list_of_outdated_dependencies(requirements_file_contents) -> list(str):
     for line in requirements_file_contents.splitlines():
         if line.startswith("#"):
             continue
-        elif "==" in line:
+        if "==" in line:
             package_name, current_version = line.split("==")
             latest_version = get_latest_version(package_name)
+            if not latest_version:
+                continue
+
             try:
                 if version.parse(latest_version) > version.parse(current_version):
                     outdated_dependencies.append(f"Package: {package_name}, Current: {current_version}, Latest: {latest_version}")
             except InvalidVersion:
                 # Unable to parse values so add to the report. User can decide how to handle it
                 outdated_dependencies.append(f"Package: {package_name}, Current: {current_version}, Latest: {latest_version}")
-        else:
-            continue
+
     return outdated_dependencies
 
-def check_outdated_dependencies(repo_data: dict[str, str]) -> str:
+def check_outdated_dependencies(repo_data: dict[str, str]) -> dict[str, str] | str:
     """
     Searches for a requirements file from the root directory since we can find it here for over 80% of repos.
     If not found, conduct a search of the repo for the filename
     Check the file for any dependencies that need updating
+
+    Current Limitation: File name must be requirements.txt
     """
     keys = ["location", "filename", "file_contents", "outdated_dependencies"]
     dependencies = dict.fromkeys(keys)
@@ -172,8 +186,11 @@ def check_outdated_dependencies(repo_data: dict[str, str]) -> str:
 
     response = make_request(REQUIREMENTS_FILE, api_url)
 
+    if not response:
+        return constants.ERROR
+
     # if not found in root directory, search throughout the repo
-    if response == constants.ERROR or response == constants.NO_FILE or response.status_code == 404:
+    if response.status_code == 404:
         api_url = get_api_url(repo_data["owner"], repo_data["repo_name"], True)
         response = make_request(REQUIREMENTS_FILE, api_url, (3,27))
         if not response:
@@ -193,7 +210,7 @@ def check_outdated_dependencies(repo_data: dict[str, str]) -> str:
 
     return constants.ERROR
 
-def final_report(repo: str, readme_file: str, dependencies: list(str)) -> str:
+def final_report(repo: str, readme_file: str, dependencies: list[str] | str) -> str:
     """
     Creates a report of a GitHub repo.
     """
@@ -228,5 +245,3 @@ def final_report(repo: str, readme_file: str, dependencies: list(str)) -> str:
 
     report += constants.END_OF_REPORT
     return report
-
-
